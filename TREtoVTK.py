@@ -5,6 +5,8 @@ from io import StringIO
 
 import itk
 import vtk
+import math
+
 
 def DowncastToVesselTubeSOPoint(soPoint):
     '''Hacky way to downcast SpatialObjectPoint.'''
@@ -52,20 +54,72 @@ def DowncastToVesselTubeSOPoint(soPoint):
 
     return vesselTubePoint
 
+
 def GetTubePoints(tube):
     '''Gets the points and radii associated with the tube.'''
     points = list()
-    for j in range(tube.GetNumberOfPoints()):
-        point = tube.GetPoint(j)
-        point = DowncastToVesselTubeSOPoint(point)
+    if tube.GetNumberOfPoints() < 2:
+        print("Not enough points")
+        return
+    # First point
+    point = tube.GetPoint(0)
+    buf = StringIO()
+    print(point, file=buf)
+    buf.seek(0)
+    props = buf.read().split("\n")
+    lR = float(props[3].strip()[len("R: "):])
+    lX = point.GetPosition()
+    points.append(((lX[0], lX[1], lX[2]), lR))
 
-        radius = point.GetRadius()
-        pos = point.GetPosition()
+    nextPoint = tube.GetPoint(1)
+    lt = nextPoint.GetPosition()
+    lT = [a_i - b_i for a_i, b_i in zip(lX, lt)]
+    vtk.vtkMath.Normalize(lT)
 
-        # I think I need to extract the values otherwise corruption occurs
-        # on the itkPointD3 objects.
-        points.append(((pos[0], pos[1], pos[2]), radius))
+    for j in range(2, tube.GetNumberOfPoints()):
+        pt = tube.GetPoint(j)
+        bufn = StringIO()
+        print(pt, file=bufn)
+        bufn.seek(0)
+        propsn = bufn.read().split("\n")
+        lRn = float(propsn[3].strip()[len("R: "):])
+        ct = pt.GetPosition()
+        cT = [a_i - b_i for a_i, b_i in zip(lX, ct)]
+        vtk.vtkMath.Normalize(cT)
+        tf = vtk.vtkMath.Dot(cT, lT)
+        if (math.fabs(tf) < 0.975) or (math.fabs(lRn - lR) > (0.025 * lR)):
+            lX = pt.GetPosition()
+            points.append(((lX[0], lX[1], lX[2]), lRn))
+            if (j < tube.GetNumberOfPoints() - 1):
+                nextPoint = tube.GetPoint(j + 1)
+                lt = nextPoint.GetPosition()
+                lT = [a_i - b_i for a_i, b_i in zip(lX, lt)]
+                vtk.vtkMath.Normalize(lT)
+                bufn = StringIO()
+                print(pt, file=bufn)
+                bufn.seek(0)
+                propsn = bufn.read().split("\n")
+                lR = float(propsn[3].strip()[len("R: "):])
+        #  point = DowncastToVesselTubeSOPoint(point)
+
+    # last point
+    point = tube.GetPoint(tube.GetNumberOfPoints() - 1)
+    lX = point.GetPosition()
+    buf = StringIO()
+    print(point, file=buf)
+    buf.seek(0)
+    props = buf.read().split("\n")
+    lR = float(props[3].strip()[len("R: "):])
+    #  points.append(((lX[0], lX[1], lX[2]), lR))
+
+    #  radius = point.GetRadius()
+    #  pos = point.GetPosition()
+
+    #  # I think I need to extract the values otherwise corruption occurs
+    #  # on the itkPointD3 objects.
+    #  points.append(((pos[0], pos[1], pos[2]), radius))
     return points
+
 
 def TubeIterator(tubeGroup):
     '''Iterates over all tubes in a tube group.'''
@@ -78,6 +132,7 @@ def TubeIterator(tubeGroup):
     for i in range(obj.GetNumberOfChildren()):
         for tube in TubeIterator(children[i]):
             yield tube
+
 
 if __name__ == '__main__':
     import sys
@@ -100,30 +155,33 @@ if __name__ == '__main__':
     for index, tube in enumerate(TubeIterator(reader.GetGroup())):
         tube.ComputeObjectToWorldTransform()
         transform = tube.GetIndexToWorldTransform()
-        scaling = [transform.GetMatrix()(i,i) for i in range(3)]
+        scaling = [transform.GetMatrix()(i, i) for i in range(3)]
         scale = sum(scaling) / len(scaling)
 
-        line = vtk.vtkPolyLine()
-        line.GetPointIds().SetNumberOfIds(tube.GetNumberOfPoints())
-
         linePtId = 0
-        for pt, radius in GetTubePoints(tube):
+        pts = GetTubePoints(tube)
+        line = vtk.vtkPolyLine()
+        line.GetPointIds().SetNumberOfIds(len(pts))
+
+        for pt, radius in pts:
             pt = transform.TransformPoint(pt)
             # columns: TUBE_ID POINT_X POINT_Y POINT_Z RADIUS
-            print('%d %f %f %f %f' % (tube.GetId(), pt[0], pt[1], pt[2], radius*scale))
+            #  print('%d %f %f %f %f' % (tube.GetId(), pt[0], pt[1], pt[2], radius * scale))
             ptId = points.InsertNextPoint(pt)
             line.GetPointIds().SetId(linePtId, ptId)
             radiusArray.InsertNextTuple1(radius * scale)
             linePtId += 1
         lines.InsertNextCell(line)
-        break
 
     polyData.SetPoints(points)
     polyData.SetLines(lines)
     polyData.GetPointData().SetScalars(radiusArray)
 
+    clean = vtk.vtkCleanPolyData()
+    clean.SetInputData(polyData)
+
     xmlWriter = vtk.vtkXMLPolyDataWriter()
     xmlWriter.SetFileName(tre_file + ".vtp")
-    xmlWriter.SetInputData(polyData)
-    #  xmlWriter.SetInputConnection(clean.GetOutputPort())
+    #  xmlWriter.SetInputData(polyData)
+    xmlWriter.SetInputConnection(clean.GetOutputPort())
     xmlWriter.Write()
